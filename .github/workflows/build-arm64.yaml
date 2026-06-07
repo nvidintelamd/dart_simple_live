@@ -65,32 +65,26 @@ jobs:
           cd simple_live_app
           flutter pub get
 
-      # 步骤1: 让 Flutter 生成项目结构 (x64)
       - name: Generate Flutter project structure
         run: |
           cd simple_live_app
           flutter build windows --release
         shell: pwsh
 
-      # 步骤2: 用 CMake 重新构建，目标 ARM64
       - name: Rebuild native code for ARM64 with CMake
         shell: pwsh
         run: |
           cd simple_live_app
-
-          # 找到 Flutter SDK 路径
           $flutterRoot = (flutter --machine config 2>$null | ConvertFrom-Json).flutterRoot
 
-          # 创建 ARM64 构建目录
           $arm64BuildDir = "build/windows-arm64"
           if (Test-Path $arm64BuildDir) { Remove-Item $arm64BuildDir -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $arm64BuildDir | Out-Null
 
-          # 替换 ephemeral 目录中的 DLL 为 ARM64 版本
+          # Replace ephemeral DLLs with ARM64 versions
           $ephemeralDir = "windows/flutter/ephemeral"
           $cacheDir = "$flutterRoot/bin/cache/artifacts/engine"
 
-          # 备份 x64 DLL 并替换为 ARM64
           $archFiles = @(
             @{ src = "$cacheDir/windows-arm64-release/flutter_windows.dll"; dst = "$ephemeralDir/flutter_windows.dll" },
             @{ src = "$cacheDir/windows-arm64-release/flutter_windows.dll.exp"; dst = "$ephemeralDir/flutter_windows.dll.exp" },
@@ -106,7 +100,6 @@ jobs:
             }
           }
 
-          # 同时替换 cpp_client_wrapper
           $wrapperSrc = "$cacheDir/windows-arm64/cpp_client_wrapper"
           $wrapperDst = "$ephemeralDir/cpp_client_wrapper"
           if (Test-Path $wrapperSrc) {
@@ -114,22 +107,16 @@ jobs:
             Write-Host "Replaced cpp_client_wrapper"
           }
 
-          # 用 CMake 生成 ARM64 项目
-          Write-Host "=== CMake configure for ARM64 ==="
-          cmake -S windows -B $arm64BuildDir `
-            -G "Visual Studio 17 2022" `
-            -A ARM64 `
-            -DFLUTTER_TARGET_PLATFORM=windows-arm64
+          # CMake configure for ARM64
+          Write-Host "=== CMake configure ==="
+          cmake -S windows -B $arm64BuildDir -G "Visual Studio 17 2022" -A ARM64 -DFLUTTER_TARGET_PLATFORM=windows-arm64
 
-          Write-Host "=== CMake build for ARM64 ==="
+          # CMake build
+          Write-Host "=== CMake build ==="
           cmake --build $arm64BuildDir --config Release --target install
 
-          # 检查产物
+          # Check output
           Write-Host "=== Build output ==="
-          Get-ChildItem $arm64BuildDir -Recurse -Filter "slive.exe" -ErrorAction SilentlyContinue |
-            ForEach-Object { Write-Host "EXE: $($_.FullName) ($($_.Length) bytes)" }
-
-          # 验证 EXE 架构
           $exe = Get-ChildItem $arm64BuildDir -Recurse -Filter "slive.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($exe) {
             $bytes = [System.IO.File]::ReadAllBytes($exe.FullName)
@@ -141,79 +128,56 @@ jobs:
               0x14C  { "x86 (i386)" }
               default { "Unknown (0x$($machineType.ToString('X4')))" }
             }
-            Write-Host "slive.exe architecture: $arch"
+            Write-Host "slive.exe: $($exe.FullName) - Architecture: $arch - Size: $($exe.Length) bytes"
+          } else {
+            Write-Host "ERROR: slive.exe not found"
+            Get-ChildItem $arm64BuildDir -Recurse -Filter "*.exe" -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "Found: $($_.FullName)" }
           }
 
       - name: Install Inno Setup
         run: choco install innosetup -y
         shell: powershell
 
-      - name: Add Chinese language file
-        run: |
-          cd simple_live_app
-          Copy-Item "windows/packaging/exe/ChineseSimplified.isl" "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl" -ErrorAction SilentlyContinue
-        shell: powershell
-
       - name: Package ARM64 EXE installer
         shell: pwsh
         run: |
           cd simple_live_app
-
           $arm64BuildDir = "build/windows-arm64"
-          $releaseDir = Get-ChildItem $arm64BuildDir -Recurse -Directory -Filter "Release" |
-            Where-Object { $_.FullName -match "runner" -and $_.FullName -match "install" } |
-            Select-Object -First 1
 
+          $releaseDir = Get-ChildItem $arm64BuildDir -Recurse -Directory -Filter "Release" |
+            Where-Object { $_.FullName -match "runner" -and $_.FullName -match "install" } | Select-Object -First 1
           if (-not $releaseDir) {
             $releaseDir = Get-ChildItem $arm64BuildDir -Recurse -Directory -Filter "Release" |
               Where-Object { $_.FullName -match "runner" } | Select-Object -First 1
           }
-
           if (-not $releaseDir) {
             $releaseDir = Get-ChildItem $arm64BuildDir -Recurse -Directory -Filter "Release" | Select-Object -First 1
           }
 
           if ($releaseDir) {
             Write-Host "Release dir: $($releaseDir.FullName)"
-            Get-ChildItem $releaseDir.FullName | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
 
-            # 创建 Inno Setup 脚本
-            $issContent = @"
-[Setup]
-AppName=Slive
-AppVersion=1.8.7
-DefaultDirName={autopf}\Slive
-DefaultGroupName=Slive
-OutputBaseFilename=Slive-ARM64-Setup
-OutputDir=Output
-Compression=lzma2
-SolidCompression=yes
-ArchitecturesAllowed=arm64
-ArchitecturesInstallIn64BitMode=arm64
-SetupIconFile=assets\icons\app_icon.ico
-[Files]
-Source: "$($releaseDir.FullName)\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
-[Icons]
-Name: "{group}\Slive"; Filename: "{app}\slive.exe"
-Name: "{commondesktop}\Slive"; Filename: "{app}\slive.exe"
-[Run]
-Filename: "{app}\slive.exe"; Description: "Launch Slive"; Flags: nowait postinstall skipifsilent
-"@
+            # Generate ISS file from base64 to avoid YAML parsing issues
+            $issB64 = "W1NldHVwXQpBcHBOYW1lPVNsaXZlCkFwcFZlcnNpb249MS44LjcKRGVmYXVsdERpck5hbWU9e2F1dG9wZn1cU2xpdmUKRGVmYXVsdEdyb3VwTmFtZT1TbGl2ZQpPdXRwdXRCYXNlRmlsZW5hbWU9U2xpdmUtQVJNNjQtU2V0dXAKT3V0cHV0RGlyPU91dHB1dApDb21wcmVzc2lvbj1sem1hMgpTb2xpZENvbXByZXNzaW9uPXllcwpBcmNoaXRlY3R1cmVzQWxsb3dlZD1hcm02NApBcmNoaXRlY3R1cmVzSW5zdGFsbEluNjRCaXRNb2RlPWFybTY0ClNldHVwSWNvbkZpbGU9YXNzZXRzXGljb25zXGFwcF9pY29uLmljbwoKW0ZpbGVzXQpTb3VyY2U6ICJSRUxFQVNFRElSXCoiOyBEZXN0RGlyOiAie2FwcH0iOyBGbGFnczogcmVjdXJzZXN1YmRpcnMgaWdub3JldmVyc2lvbgoKW0ljb25zXQpOYW1lOiAie2dyb3VwfVxTbGl2ZSI7IEZpbGVuYW1lOiAie2FwcH1cc2xpdmUuZXhlIgpOYW1lOiAie2NvbW1vbmRlc2t0b3B9XFNsaXZlIjsgRmlsZW5hbWU6ICJ7YXBwfVxzbGl2ZS5leGUiCgpbUnVuXQpGaWxlbmFtZTogInthcHB9XHNsaXZlLmV4ZSI7IERlc2NyaXB0aW9uOiAiTGF1bmNoIFNsaXZlIjsgRmxhZ3M6IG5vd2FpdCBwb3N0aW5zdGFsbCBza2lwaWZzaWxlbnQK"
+            $issContent = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($issB64))
+            $issContent = $issContent -replace "RELEASEDIR", $releaseDir.FullName
             Set-Content "$arm64BuildDir\slive-arm64.iss" $issContent
 
             $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-            & $iscc "$arm64BuildDir\slive-arm64.iss"
-
-            # 复制到 dist
-            $distDir = "build/dist/arm64"
-            New-Item -ItemType Directory -Force -Path $distDir | Out-Null
-            Get-ChildItem "$arm64BuildDir/Output/*.exe" | ForEach-Object {
-              Copy-Item $_ $distDir
-              Write-Host "Created: $distDir/$($_.Name)"
+            if (Test-Path $iscc) {
+              & $iscc "$arm64BuildDir\slive-arm64.iss"
+              $distDir = "build/dist/arm64"
+              New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+              Get-ChildItem "$arm64BuildDir/Output/*.exe" | ForEach-Object {
+                Copy-Item $_ $distDir
+                Write-Host "Created: $distDir/$($_.Name)"
+              }
+            } else {
+              Write-Host "ISCC.exe not found"
             }
           } else {
             Write-Host "ERROR: No Release directory found"
-            Get-ChildItem $arm64BuildDir -Recurse -Directory | ForEach-Object { Write-Host $_.FullName }
           }
 
       - name: Upload Build Artifacts
@@ -230,5 +194,4 @@ Filename: "{app}\slive.exe"; Description: "Launch Slive"; Flags: nowait postinst
         run: |
           Write-Host "=== Build Summary ==="
           Write-Host "Target: Windows ARM64 native"
-          Write-Host "Flutter: latest stable (with ARM64 engine)"
           Write-Host "Check artifacts for the EXE installer"
