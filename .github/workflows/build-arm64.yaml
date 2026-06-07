@@ -56,6 +56,20 @@ jobs:
             }
           }
 
+          # icudtl.dat is architecture-independent, copy from x64
+          $icuSrc = "$cacheDir/windows-x64-release/icudtl.dat"
+          $icuDst = "$cacheDir/windows-arm64-release/icudtl.dat"
+          if ((Test-Path $icuSrc) -and !(Test-Path $icuDst)) {
+            Copy-Item $icuSrc $icuDst
+            Write-Host "Copied icudtl.dat to windows-arm64-release"
+          }
+          # Also copy to windows-arm64 directory
+          $icuDst2 = "$cacheDir/windows-arm64/icudtl.dat"
+          if ((Test-Path $icuSrc) -and !(Test-Path $icuDst2)) {
+            Copy-Item $icuSrc $icuDst2
+            Write-Host "Copied icudtl.dat to windows-arm64"
+          }
+
           Write-Host "=== ARM64 Engine DLLs ==="
           Get-ChildItem "$cacheDir/windows-arm64*" -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue |
             ForEach-Object { Write-Host $_.FullName }
