@@ -27,7 +27,7 @@ jobs:
       - name: Download ARM64 Flutter Engine
         shell: pwsh
         run: |
-          $flutterRoot = (flutter --machine config 2>$null | ConvertFrom-Json).flutterRoot
+          $flutterRoot = $env:FLUTTER_ROOT
           Write-Host "Flutter root: $flutterRoot"
           $engineVersion = (Get-Content "$flutterRoot/bin/internal/engine.version" -Raw).Trim()
           Write-Host "Engine version: $engineVersion"
@@ -75,7 +75,7 @@ jobs:
         shell: pwsh
         run: |
           cd simple_live_app
-          $flutterRoot = (flutter --machine config 2>$null | ConvertFrom-Json).flutterRoot
+          $flutterRoot = $env:FLUTTER_ROOT
 
           $arm64BuildDir = "build/windows-arm64"
           if (Test-Path $arm64BuildDir) { Remove-Item $arm64BuildDir -Recurse -Force }
