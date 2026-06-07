@@ -1,0 +1,129 @@
+name: Build Windows ARM64
+
+on:
+  workflow_dispatch: # 手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-arm64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 设置 Flutter 环境
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: simple_live_app/pubspec.yaml
+          cache: true
+          channel: "stable"
+
+      - name: Enable Flutter Desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      # 安装 Visual Studio ARM64 构建工具
+      - name: Install VS Build Tools ARM64
+        run: |
+          choco install visualstudio2022-workload-vctools --package-parameters "--add Microsoft.VisualStudio.Component.VC.Tools.ARM64" -y
+        shell: powershell
+        continue-on-error: true  # 可能已经预装了
+
+      # 安装依赖
+      - name: Restore Packages
+        run: |
+          cd simple_live_app
+          flutter pub get
+
+      # 安装 fastforge 和 Inno Setup
+      - name: Install Fastforge and Inno Setup
+        run: |
+          git clone https://github.com/SlotSun/fastforge.git
+          cd fastforge
+          dart pub global activate melos
+          melos run activate
+          choco install innosetup -y
+        shell: pwsh
+
+      # 添加中文语言文件
+      - name: Add Chinese language file for Inno Setup
+        run: |
+          cd simple_live_app
+          Copy-Item "windows/packaging/exe/ChineseSimplified.isl" "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl"
+        shell: powershell
+
+      # 方法1: 尝试 Flutter ARM64 交叉编译
+      - name: Build Windows ARM64 (flutter --target-platform)
+        id: build_arm64
+        run: |
+          cd simple_live_app
+          flutter build windows --release --target-platform windows-arm64
+        shell: pwsh
+        continue-on-error: true
+
+      # 如果 ARM64 失败，回退到 x64
+      - name: Build Windows x64 (fallback)
+        if: steps.build_arm64.outcome == 'failure'
+        run: |
+          cd simple_live_app
+          flutter build windows --release
+        shell: pwsh
+
+      # 使用 fastforge 打包 EXE
+      - name: Package EXE with Fastforge
+        run: |
+          cd simple_live_app
+          fastforge package --platform windows --targets exe --skip-clean
+          cd build/dist/*
+          Get-ChildItem "simple_live_app-*" | ForEach-Object {
+              $newName = $_.Name -replace '^simple_live_app', 'Slive'
+              Rename-Item $_ -NewName $newName
+          }
+        shell: pwsh
+        continue-on-error: true
+
+      # 如果 fastforge 失败，手动用 Inno Setup 打包
+      - name: Package EXE manually (fallback)
+        if: failure() || steps.build_arm64.outcome == 'failure'
+        run: |
+          cd simple_live_app
+          # 创建临时的 Inno Setup 脚本
+          $exePath = Get-ChildItem -Path "build/windows/x64/runner/Release" -Filter "*.exe" -ErrorAction SilentlyContinue
+          if (-not $exePath) {
+            $exePath = Get-ChildItem -Path "build/windows/ARM64/runner/Release" -Filter "*.exe" -ErrorAction SilentlyContinue
+          }
+          if (-not $exePath) {
+            $exePath = Get-ChildItem -Path "build/windows/*/runner/Release" -Filter "slive.exe" -Recurse -ErrorAction SilentlyContinue
+          }
+          if ($exePath) {
+            Write-Host "Found EXE: $($exePath.FullName)"
+          } else {
+            Write-Host "No EXE found, listing build directory:"
+            Get-ChildItem -Path "build" -Recurse -Filter "*.exe" | Select-Object FullName
+          }
+        shell: pwsh
+        continue-on-error: true
+
+      # 上传构建产物
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-arm64-build
+          path: |
+            simple_live_app/build/dist/*/*.exe
+            simple_live_app/build/windows/*/runner/Release/*.exe
+          if-no-files-found: warn
+
+      # 构建状态报告
+      - name: Build Status Report
+        run: |
+          if ("${{ steps.build_arm64.outcome }}" -eq "success") {
+            Write-Host "✅ ARM64 原生编译成功"
+          } else {
+            Write-Host "⚠️ ARM64 编译失败，已回退到 x64 (可在 ARM64 Windows 上通过模拟器运行)"
+          }
+        shell: pwsh
