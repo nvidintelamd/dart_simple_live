@@ -1,7 +1,7 @@
 name: Build Windows ARM64
 
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,118 +12,223 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 设置 Flutter 环境
-      - name: Setup Flutter
+      - name: Setup Flutter (latest stable)
         uses: subosito/flutter-action@v2
         with:
-          flutter-version-file: simple_live_app/pubspec.yaml
-          cache: true
           channel: "stable"
+          cache: true
 
       - name: Enable Flutter Desktop
         run: flutter config --enable-windows-desktop
 
-      - name: Flutter doctor
-        run: flutter doctor -v
+      - name: Flutter version check
+        run: flutter --version
 
-      # 安装 Visual Studio ARM64 构建工具
-      - name: Install VS Build Tools ARM64
+      - name: Download ARM64 Flutter Engine
+        shell: pwsh
         run: |
-          choco install visualstudio2022-workload-vctools --package-parameters "--add Microsoft.VisualStudio.Component.VC.Tools.ARM64" -y
-        shell: powershell
-        continue-on-error: true  # 可能已经预装了
+          $flutterRoot = (flutter --machine config 2>$null | ConvertFrom-Json).flutterRoot
+          Write-Host "Flutter root: $flutterRoot"
+          $engineVersion = (Get-Content "$flutterRoot/bin/internal/engine.version" -Raw).Trim()
+          Write-Host "Engine version: $engineVersion"
+          $cacheDir = "$flutterRoot/bin/cache/artifacts/engine"
+          $baseUrl = "https://storage.googleapis.com/flutter_infra_release/flutter/$engineVersion"
 
-      # 安装依赖
+          $downloads = @(
+            @{ url = "$baseUrl/windows-arm64-debug/windows-arm64-flutter.zip"; dir = "windows-arm64-debug" },
+            @{ url = "$baseUrl/windows-arm64-profile/windows-arm64-flutter.zip"; dir = "windows-arm64-profile" },
+            @{ url = "$baseUrl/windows-arm64-release/windows-arm64-flutter.zip"; dir = "windows-arm64-release" },
+            @{ url = "$baseUrl/windows-arm64/flutter-cpp-client-wrapper.zip"; dir = "windows-arm64" }
+          )
+
+          foreach ($dl in $downloads) {
+            $targetDir = "$cacheDir/$($dl.dir)"
+            $zipFile = "$env:TEMP/$($dl.dir).zip"
+            Write-Host "Downloading: $($dl.url)"
+            try {
+              Invoke-WebRequest -Uri $dl.url -OutFile $zipFile -UseBasicParsing
+              New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+              Expand-Archive -Path $zipFile -DestinationPath $targetDir -Force
+              Remove-Item $zipFile -ErrorAction SilentlyContinue
+              Write-Host "OK: $($dl.dir)"
+            } catch {
+              Write-Host "FAILED: $($dl.dir) - $($_.Exception.Message)"
+            }
+          }
+
+          Write-Host "=== ARM64 Engine DLLs ==="
+          Get-ChildItem "$cacheDir/windows-arm64*" -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host $_.FullName }
+
       - name: Restore Packages
         run: |
           cd simple_live_app
           flutter pub get
 
-      # 安装 fastforge 和 Inno Setup
-      - name: Install Fastforge and Inno Setup
-        run: |
-          git clone https://github.com/SlotSun/fastforge.git
-          cd fastforge
-          dart pub global activate melos
-          melos run activate
-          choco install innosetup -y
-        shell: pwsh
-
-      # 添加中文语言文件
-      - name: Add Chinese language file for Inno Setup
-        run: |
-          cd simple_live_app
-          Copy-Item "windows/packaging/exe/ChineseSimplified.isl" "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl"
-        shell: powershell
-
-      # 方法1: 尝试 Flutter ARM64 交叉编译
-      - name: Build Windows ARM64 (flutter --target-platform)
-        id: build_arm64
-        run: |
-          cd simple_live_app
-          flutter build windows --release --target-platform windows-arm64
-        shell: pwsh
-        continue-on-error: true
-
-      # 如果 ARM64 失败，回退到 x64
-      - name: Build Windows x64 (fallback)
-        if: steps.build_arm64.outcome == 'failure'
+      # 步骤1: 让 Flutter 生成项目结构 (x64)
+      - name: Generate Flutter project structure
         run: |
           cd simple_live_app
           flutter build windows --release
         shell: pwsh
 
-      # 使用 fastforge 打包 EXE
-      - name: Package EXE with Fastforge
-        run: |
-          cd simple_live_app
-          fastforge package --platform windows --targets exe --skip-clean
-          cd build/dist/*
-          Get-ChildItem "simple_live_app-*" | ForEach-Object {
-              $newName = $_.Name -replace '^simple_live_app', 'Slive'
-              Rename-Item $_ -NewName $newName
-          }
+      # 步骤2: 用 CMake 重新构建，目标 ARM64
+      - name: Rebuild native code for ARM64 with CMake
         shell: pwsh
-        continue-on-error: true
-
-      # 如果 fastforge 失败，手动用 Inno Setup 打包
-      - name: Package EXE manually (fallback)
-        if: failure() || steps.build_arm64.outcome == 'failure'
         run: |
           cd simple_live_app
-          # 创建临时的 Inno Setup 脚本
-          $exePath = Get-ChildItem -Path "build/windows/x64/runner/Release" -Filter "*.exe" -ErrorAction SilentlyContinue
-          if (-not $exePath) {
-            $exePath = Get-ChildItem -Path "build/windows/ARM64/runner/Release" -Filter "*.exe" -ErrorAction SilentlyContinue
+
+          # 找到 Flutter SDK 路径
+          $flutterRoot = (flutter --machine config 2>$null | ConvertFrom-Json).flutterRoot
+
+          # 创建 ARM64 构建目录
+          $arm64BuildDir = "build/windows-arm64"
+          if (Test-Path $arm64BuildDir) { Remove-Item $arm64BuildDir -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $arm64BuildDir | Out-Null
+
+          # 替换 ephemeral 目录中的 DLL 为 ARM64 版本
+          $ephemeralDir = "windows/flutter/ephemeral"
+          $cacheDir = "$flutterRoot/bin/cache/artifacts/engine"
+
+          # 备份 x64 DLL 并替换为 ARM64
+          $archFiles = @(
+            @{ src = "$cacheDir/windows-arm64-release/flutter_windows.dll"; dst = "$ephemeralDir/flutter_windows.dll" },
+            @{ src = "$cacheDir/windows-arm64-release/flutter_windows.dll.exp"; dst = "$ephemeralDir/flutter_windows.dll.exp" },
+            @{ src = "$cacheDir/windows-arm64-release/flutter_windows.dll.lib"; dst = "$ephemeralDir/flutter_windows.dll.lib" }
+          )
+
+          foreach ($f in $archFiles) {
+            if (Test-Path $f.src) {
+              Copy-Item $f.src $f.dst -Force
+              Write-Host "Replaced: $($f.dst)"
+            } else {
+              Write-Host "MISSING: $($f.src)"
+            }
           }
-          if (-not $exePath) {
-            $exePath = Get-ChildItem -Path "build/windows/*/runner/Release" -Filter "slive.exe" -Recurse -ErrorAction SilentlyContinue
+
+          # 同时替换 cpp_client_wrapper
+          $wrapperSrc = "$cacheDir/windows-arm64/cpp_client_wrapper"
+          $wrapperDst = "$ephemeralDir/cpp_client_wrapper"
+          if (Test-Path $wrapperSrc) {
+            Copy-Item "$wrapperSrc/*" $wrapperDst -Recurse -Force
+            Write-Host "Replaced cpp_client_wrapper"
           }
-          if ($exePath) {
-            Write-Host "Found EXE: $($exePath.FullName)"
+
+          # 用 CMake 生成 ARM64 项目
+          Write-Host "=== CMake configure for ARM64 ==="
+          cmake -S windows -B $arm64BuildDir `
+            -G "Visual Studio 17 2022" `
+            -A ARM64 `
+            -DFLUTTER_TARGET_PLATFORM=windows-arm64
+
+          Write-Host "=== CMake build for ARM64 ==="
+          cmake --build $arm64BuildDir --config Release --target install
+
+          # 检查产物
+          Write-Host "=== Build output ==="
+          Get-ChildItem $arm64BuildDir -Recurse -Filter "slive.exe" -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "EXE: $($_.FullName) ($($_.Length) bytes)" }
+
+          # 验证 EXE 架构
+          $exe = Get-ChildItem $arm64BuildDir -Recurse -Filter "slive.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($exe) {
+            $bytes = [System.IO.File]::ReadAllBytes($exe.FullName)
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+            $machineType = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            $arch = switch ($machineType) {
+              0x8664 { "x64 (AMD64)" }
+              0xAA64 { "ARM64" }
+              0x14C  { "x86 (i386)" }
+              default { "Unknown (0x$($machineType.ToString('X4')))" }
+            }
+            Write-Host "slive.exe architecture: $arch"
+          }
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+        shell: powershell
+
+      - name: Add Chinese language file
+        run: |
+          cd simple_live_app
+          Copy-Item "windows/packaging/exe/ChineseSimplified.isl" "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl" -ErrorAction SilentlyContinue
+        shell: powershell
+
+      - name: Package ARM64 EXE installer
+        shell: pwsh
+        run: |
+          cd simple_live_app
+
+          $arm64BuildDir = "build/windows-arm64"
+          $releaseDir = Get-ChildItem $arm64BuildDir -Recurse -Directory -Filter "Release" |
+            Where-Object { $_.FullName -match "runner" -and $_.FullName -match "install" } |
+            Select-Object -First 1
+
+          if (-not $releaseDir) {
+            $releaseDir = Get-ChildItem $arm64BuildDir -Recurse -Directory -Filter "Release" |
+              Where-Object { $_.FullName -match "runner" } | Select-Object -First 1
+          }
+
+          if (-not $releaseDir) {
+            $releaseDir = Get-ChildItem $arm64BuildDir -Recurse -Directory -Filter "Release" | Select-Object -First 1
+          }
+
+          if ($releaseDir) {
+            Write-Host "Release dir: $($releaseDir.FullName)"
+            Get-ChildItem $releaseDir.FullName | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
+
+            # 创建 Inno Setup 脚本
+            $issContent = @"
+[Setup]
+AppName=Slive
+AppVersion=1.8.7
+DefaultDirName={autopf}\Slive
+DefaultGroupName=Slive
+OutputBaseFilename=Slive-ARM64-Setup
+OutputDir=Output
+Compression=lzma2
+SolidCompression=yes
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
+SetupIconFile=assets\icons\app_icon.ico
+[Files]
+Source: "$($releaseDir.FullName)\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+[Icons]
+Name: "{group}\Slive"; Filename: "{app}\slive.exe"
+Name: "{commondesktop}\Slive"; Filename: "{app}\slive.exe"
+[Run]
+Filename: "{app}\slive.exe"; Description: "Launch Slive"; Flags: nowait postinstall skipifsilent
+"@
+            Set-Content "$arm64BuildDir\slive-arm64.iss" $issContent
+
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+            & $iscc "$arm64BuildDir\slive-arm64.iss"
+
+            # 复制到 dist
+            $distDir = "build/dist/arm64"
+            New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+            Get-ChildItem "$arm64BuildDir/Output/*.exe" | ForEach-Object {
+              Copy-Item $_ $distDir
+              Write-Host "Created: $distDir/$($_.Name)"
+            }
           } else {
-            Write-Host "No EXE found, listing build directory:"
-            Get-ChildItem -Path "build" -Recurse -Filter "*.exe" | Select-Object FullName
+            Write-Host "ERROR: No Release directory found"
+            Get-ChildItem $arm64BuildDir -Recurse -Directory | ForEach-Object { Write-Host $_.FullName }
           }
-        shell: pwsh
-        continue-on-error: true
 
-      # 上传构建产物
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-arm64-build
           path: |
-            simple_live_app/build/dist/*/*.exe
-            simple_live_app/build/windows/*/runner/Release/*.exe
+            simple_live_app/build/dist/**/*.exe
+            simple_live_app/build/windows-arm64/**/Release/slive.exe
           if-no-files-found: warn
 
-      # 构建状态报告
-      - name: Build Status Report
-        run: |
-          if ("${{ steps.build_arm64.outcome }}" -eq "success") {
-            Write-Host "✅ ARM64 原生编译成功"
-          } else {
-            Write-Host "⚠️ ARM64 编译失败，已回退到 x64 (可在 ARM64 Windows 上通过模拟器运行)"
-          }
+      - name: Summary
         shell: pwsh
+        run: |
+          Write-Host "=== Build Summary ==="
+          Write-Host "Target: Windows ARM64 native"
+          Write-Host "Flutter: latest stable (with ARM64 engine)"
+          Write-Host "Check artifacts for the EXE installer"
