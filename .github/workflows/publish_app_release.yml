@@ -368,6 +368,14 @@ jobs:
           cd simple_live_app
           flutter pub get
 
+      # 先用 x64 构建一次，生成 CMake 项目结构（generated_config.cmake 等）
+      - name: Generate Flutter project structure (x64)
+        run: |
+          cd simple_live_app
+          flutter build windows --release
+        env:
+          FLUTTER_ROOT: ${{ env.FLUTTER_ROOT }}
+
       # 下载 ARM64 Flutter 引擎文件（Flutter SDK 默认只含 x64 引擎）
       - name: Download ARM64 Flutter Engine
         shell: pwsh
