@@ -384,36 +384,127 @@ jobs:
           flutter clean
           flutter pub get
 
+      # 下载 ARM64 Flutter 引擎文件（Flutter SDK 默认只含 x64 引擎）
+      - name: Download ARM64 Flutter Engine
+        shell: pwsh
+        run: |
+          $flutterRoot = $env:FLUTTER_ROOT
+          Write-Host "Flutter root: $flutterRoot"
+          $engineVersion = (Get-Content "$flutterRoot/bin/internal/engine.version" -Raw).Trim()
+          Write-Host "Engine version: $engineVersion"
+          $cacheDir = "$flutterRoot/bin/cache/artifacts/engine"
+          $baseUrl = "https://storage.googleapis.com/flutter_infra_release/flutter/$engineVersion"
+
+          $downloads = @(
+            @{ url = "$baseUrl/windows-arm64-debug/windows-arm64-flutter.zip"; dir = "windows-arm64-debug" },
+            @{ url = "$baseUrl/windows-arm64-profile/windows-arm64-flutter.zip"; dir = "windows-arm64-profile" },
+            @{ url = "$baseUrl/windows-arm64-release/windows-arm64-flutter.zip"; dir = "windows-arm64-release" },
+            @{ url = "$baseUrl/windows-arm64/flutter-cpp-client-wrapper.zip"; dir = "windows-arm64" }
+          )
+
+          foreach ($dl in $downloads) {
+            $targetDir = "$cacheDir/$($dl.dir)"
+            $zipFile = "$env:TEMP/$($dl.dir).zip"
+            Write-Host "Downloading: $($dl.url)"
+            try {
+              Invoke-WebRequest -Uri $dl.url -OutFile $zipFile -UseBasicParsing
+              New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+              Expand-Archive -Path $zipFile -DestinationPath $targetDir -Force
+              Remove-Item $zipFile -ErrorAction SilentlyContinue
+              Write-Host "OK: $($dl.dir)"
+            } catch {
+              Write-Host "FAILED: $($dl.dir) - $($_.Exception.Message)"
+            }
+          }
+
+          # icudtl.dat 是架构无关的，从 x64 复制
+          $icuSrc = "$cacheDir/windows-x64-release/icudtl.dat"
+          $icuDst = "$cacheDir/windows-arm64-release/icudtl.dat"
+          if ((Test-Path $icuSrc) -and !(Test-Path $icuDst)) {
+            Copy-Item $icuSrc $icuDst
+            Write-Host "Copied icudtl.dat to windows-arm64-release"
+          }
+          $icuDst2 = "$cacheDir/windows-arm64/icudtl.dat"
+          if ((Test-Path $icuSrc) -and !(Test-Path $icuDst2)) {
+            Copy-Item $icuSrc $icuDst2
+            Write-Host "Copied icudtl.dat to windows-arm64"
+          }
+
+          Write-Host "=== ARM64 Engine DLLs ==="
+          Get-ChildItem "$cacheDir/windows-arm64*" -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host $_.FullName }
+        env:
+          FLUTTER_ROOT: ${{ env.FLUTTER_ROOT }}
+
+      # 替换 ephemeral 目录中的 x64 DLL 为 ARM64 版本
+      - name: Replace ephemeral DLLs with ARM64 versions
+        shell: pwsh
+        run: |
+          $flutterRoot = $env:FLUTTER_ROOT
+          $cacheDir = "$flutterRoot/bin/cache/artifacts/engine"
+          $ephemeralDir = "simple_live_app/windows/flutter/ephemeral"
+
+          $replacements = @(
+            @{ src = "$cacheDir/windows-arm64-release/flutter_windows.dll"; dst = "$ephemeralDir/flutter_windows.dll" },
+            @{ src = "$cacheDir/windows-arm64-release/flutter_windows.dll.exp"; dst = "$ephemeralDir/flutter_windows.dll.exp" },
+            @{ src = "$cacheDir/windows-arm64-release/flutter_windows.dll.lib"; dst = "$ephemeralDir/flutter_windows.dll.lib" }
+          )
+
+          foreach ($r in $replacements) {
+            if (Test-Path $r.src) {
+              Copy-Item $r.src $r.dst -Force
+              Write-Host "Replaced: $($r.dst)"
+            } else {
+              Write-Host "WARNING: Source not found: $($r.src)"
+            }
+          }
+        env:
+          FLUTTER_ROOT: ${{ env.FLUTTER_ROOT }}
+
       # 设置 Rust ARM64 target
       - name: Setup Rust ARM64 target
         run: |
           rustup target add aarch64-pc-windows-msvc
 
-      # 安装 Visual Studio ARM64 构建工具
-      - name: Install VS ARM64 build tools
-        run: |
-          & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" modify --installPath "C:\Program Files\Microsoft Visual Studio\2022\Enterprise" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --quiet --wait
-        shell: powershell
-
-      # 设置 Fastforge 环境
-      - name: Install Fastforge
-        run: |
-          git clone https://github.com/SlotSun/fastforge.git
-          cd fastforge
-          dart pub global activate melos
-          melos run activate
-
-      # 构建 Windows ARM64
+      # 用 CMake 直接构建 ARM64（不用 flutter build，因为它会覆盖 ephemeral 文件）
       - name: Build Windows ARM64
+        shell: pwsh
         run: |
           cd simple_live_app
-          fastforge package --platform windows --targets zip --skip-clean --target-platform windows-arm64
-          cd build/dist/*
-          Get-ChildItem "simple_live_app-*" | ForEach-Object {
-              $newName = $_.Name -replace '^simple_live_app', 'Slive-arm64'
-              Rename-Item $_ -NewName $newName
-          }
+
+          $arm64BuildDir = "build/windows-arm64"
+          if (Test-Path $arm64BuildDir) { Remove-Item $arm64BuildDir -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $arm64BuildDir | Out-Null
+
+          # CMake configure
+          Write-Host "=== CMake configure ==="
+          cmake -S windows -B $arm64BuildDir -G "Visual Studio 17 2022" -A ARM64 -DFLUTTER_TARGET_PLATFORM=windows-arm64
+
+          # CMake build
+          Write-Host "=== CMake build ==="
+          cmake --build $arm64BuildDir --config Release --target install
+
+          # 检查输出
+          Write-Host "=== Build output ==="
+          Get-ChildItem $arm64BuildDir -Recurse -Filter "*.exe" -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "Found: $($_.FullName)" }
+
+      # 打包 ZIP
+      - name: Package ZIP
         shell: pwsh
+        run: |
+          cd simple_live_app
+          $buildDir = "build/windows-arm64/runner/Release"
+          if (Test-Path $buildDir) {
+            $zipName = "Slive-arm64-windows.zip"
+            Compress-Archive -Path "$buildDir/*" -DestinationPath "build/$zipName" -Force
+            Write-Host "Created: build/$zipName"
+          } else {
+            Write-Host "ERROR: Build directory not found: $buildDir"
+            # 列出实际的构建输出
+            Get-ChildItem "build/windows-arm64" -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host $_.FullName }
+          }
 
       # 上传至 Artifacts
       - name: Upload Windows ARM64 to Artifacts
@@ -421,6 +512,7 @@ jobs:
         with:
           name: windows-arm64
           path: |
-            simple_live_app/build/dist/*/*.zip
+            simple_live_app/build/*.zip
+            simple_live_app/build/windows-arm64/runner/Release/*
       # 完成
       - run: echo "🍏 Windows ARM64 job's status is ${{ job.status }}."
