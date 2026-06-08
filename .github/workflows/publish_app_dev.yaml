@@ -356,3 +356,71 @@ jobs:
 
       # 完成
       - run: echo "🍏 Flatpak job's status is ${{ job.status }}."
+
+  # 打包 Windows ARM64
+  build-windows-arm64:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      # 签出代码
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      # 设置 Flutter 环境
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: simple_live_app/pubspec.yaml
+          cache: true
+
+      - name: Enable Flutter Desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Restore Packages
+        run: |
+          cd simple_live_app
+          flutter clean
+          flutter pub get
+
+      # 设置 Rust ARM64 target
+      - name: Setup Rust ARM64 target
+        run: |
+          rustup target add aarch64-pc-windows-msvc
+
+      # 安装 Visual Studio ARM64 构建工具
+      - name: Install VS ARM64 build tools
+        run: |
+          & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" modify --installPath "C:\Program Files\Microsoft Visual Studio\2022\Enterprise" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --quiet --wait
+        shell: powershell
+
+      # 设置 Fastforge 环境
+      - name: Install Fastforge
+        run: |
+          git clone https://github.com/SlotSun/fastforge.git
+          cd fastforge
+          dart pub global activate melos
+          melos run activate
+
+      # 构建 Windows ARM64
+      - name: Build Windows ARM64
+        run: |
+          cd simple_live_app
+          fastforge package --platform windows --targets zip --skip-clean --target-platform windows-arm64
+          cd build/dist/*
+          Get-ChildItem "simple_live_app-*" | ForEach-Object {
+              $newName = $_.Name -replace '^simple_live_app', 'Slive-arm64'
+              Rename-Item $_ -NewName $newName
+          }
+        shell: pwsh
+
+      # 上传至 Artifacts
+      - name: Upload Windows ARM64 to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-arm64
+          path: |
+            simple_live_app/build/dist/*/*.zip
+      # 完成
+      - run: echo "🍏 Windows ARM64 job's status is ${{ job.status }}."
