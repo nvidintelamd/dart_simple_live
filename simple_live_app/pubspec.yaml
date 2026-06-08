@@ -122,8 +122,8 @@ dependency_overrides:
       path: ./libs/android/media_kit_libs_android_video
   media_kit_libs_windows_video:
     git:
-      url: https://github.com/Predidit/media-kit.git
-      ref: 7b248251fc274f986635876946130f2afc78c959
+      url: https://github.com/nvidintelamd/media-kit.git
+      ref: f57ba0d8e3531dfd41bb278181fa351bd408276e
       path: ./libs/windows/media_kit_libs_windows_video
   media_kit_libs_macos_video:
     git:
