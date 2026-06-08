@@ -18,9 +18,15 @@ class BuildCMake {
 
   Future<void> build() async {
     final targetPlatform = Environment.targetPlatform;
-    final target = Target.forFlutterName(Environment.targetPlatform);
+    var target = Target.forFlutterName(targetPlatform);
     if (target == null) {
-      throw Exception("Unknown target platform: $targetPlatform");
+      // Fallback: try to match by Rust triple pattern for Windows ARM64
+      if (targetPlatform == 'windows-arm64') {
+        target = Target(rust: 'aarch64-pc-windows-msvc', flutter: 'windows-arm64');
+      }
+    }
+    if (target == null) {
+      throw Exception("Unknown target platform: $targetPlatform. Available targets: ${Target.all.map((t) => t.flutter).toList()}");
     }
 
     final environment = BuildEnvironment.fromEnvironment(isAndroid: false);
