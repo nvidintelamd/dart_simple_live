@@ -475,6 +475,11 @@ jobs:
         run: |
           rustup target add aarch64-pc-windows-msvc
 
+      # 确保 7-Zip 已安装（用于解压 mpv aarch64 .7z 文件）
+      - name: Install 7-Zip
+        run: choco install 7zip -y --no-progress
+        shell: pwsh
+
       # 用 CMake 直接构建 ARM64（不用 flutter build，因为它会覆盖 ephemeral 文件）
       - name: Build Windows ARM64
         shell: pwsh
