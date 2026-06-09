@@ -366,7 +366,7 @@ jobs:
       # 签出代码
       - uses: actions/checkout@v4
         with:
-          ref: dev
+          ref: master
 
       # 设置 Flutter 环境（需要 3.44+ 以支持 Windows ARM64 引擎）
       - name: Setup Flutter
