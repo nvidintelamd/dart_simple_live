@@ -426,17 +426,20 @@ jobs:
             }
           }
 
-          # icudtl.dat 是架构无关的，从 x64 复制
-          $icuSrc = "$cacheDir/windows-x64-release/icudtl.dat"
-          $icuDst = "$cacheDir/windows-arm64-release/icudtl.dat"
-          if ((Test-Path $icuSrc) -and !(Test-Path $icuDst)) {
-            Copy-Item $icuSrc $icuDst
-            Write-Host "Copied icudtl.dat to windows-arm64-release"
-          }
-          $icuDst2 = "$cacheDir/windows-arm64/icudtl.dat"
-          if ((Test-Path $icuSrc) -and !(Test-Path $icuDst2)) {
-            Copy-Item $icuSrc $icuDst2
-            Write-Host "Copied icudtl.dat to windows-arm64"
+          # icudtl.dat 是架构无关的，搜索并复制到 ARM64 目录
+          $icuSrc = Get-ChildItem "$cacheDir" -Recurse -Filter "icudtl.dat" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($icuSrc) {
+            Write-Host "Found icudtl.dat at: $($icuSrc.FullName)"
+            @("windows-arm64-release", "windows-arm64", "windows-arm64-debug", "windows-arm64-profile") | ForEach-Object {
+              $dst = "$cacheDir/$_/icudtl.dat"
+              if (!(Test-Path $dst)) {
+                New-Item -ItemType Directory -Force -Path "$cacheDir/$_" | Out-Null
+                Copy-Item $icuSrc.FullName $dst
+                Write-Host "Copied icudtl.dat to $_"
+              }
+            }
+          } else {
+            Write-Host "WARNING: icudtl.dat not found in cache, flutter build may have placed it elsewhere"
           }
 
           Write-Host "=== ARM64 Engine DLLs ==="
