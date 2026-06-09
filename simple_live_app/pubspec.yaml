@@ -123,7 +123,7 @@ dependency_overrides:
   media_kit_libs_windows_video:
     git:
       url: https://github.com/nvidintelamd/media-kit.git
-      ref: f57ba0d8e3531dfd41bb278181fa351bd408276e
+      ref: 9d797618b5ba92fcc59d1f3f4283fc642a7b0ab8
       path: ./libs/windows/media_kit_libs_windows_video
   media_kit_libs_macos_video:
     git:
